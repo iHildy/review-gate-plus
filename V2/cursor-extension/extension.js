@@ -1,17 +1,17 @@
-const vscode = require('vscode');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { spawn } = require('child_process');
+const vscode = require("vscode");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const { spawn } = require("child_process");
 
 // Cross-platform temp directory helper
 function getTempPath(filename) {
-    // Use /tmp/ for macOS and Linux, system temp for Windows
-    if (process.platform === 'win32') {
-        return path.join(os.tmpdir(), filename);
-    } else {
-        return path.join('/tmp', filename);
-    }
+  // Use /tmp/ for macOS and Linux, system temp for Windows
+  if (process.platform === "win32") {
+    return path.join(os.tmpdir(), filename);
+  } else {
+    return path.join("/tmp", filename);
+  }
 }
 
 let chatPanel = null;
@@ -23,529 +23,687 @@ let currentTriggerData = null;
 let currentRecording = null;
 
 function activate(context) {
-    console.log('Review Gate V2 extension is now active in Cursor for MCP integration!');
-    
-    // Create output channel for logging
-    outputChannel = vscode.window.createOutputChannel('Review Gate V2 ゲート');
-    context.subscriptions.push(outputChannel);
-    
-    // Silent activation - only log to console, not output channel
-    console.log('Review Gate V2 extension activated for Cursor MCP integration by Lakshman Turlapati');
+  console.log(
+    "Review Gate V2 extension is now active in Cursor for MCP integration!"
+  );
 
-    // Register command to open Review Gate manually
-    let disposable = vscode.commands.registerCommand('reviewGate.openChat', () => {
-        openReviewGatePopup(context, {
-            message: "Welcome to Review Gate V2! Please provide your review or feedback.",
-            title: "Review Gate"
+  // Create output channel for logging
+  outputChannel = vscode.window.createOutputChannel("Review Gate V2 ゲート");
+  context.subscriptions.push(outputChannel);
+
+  // Silent activation - only log to console, not output channel
+  console.log(
+    "Review Gate V2 extension activated for Cursor MCP integration by Lakshman Turlapati"
+  );
+
+  // Register command to open Review Gate manually
+  let disposable = vscode.commands.registerCommand(
+    "reviewGate.openChat",
+    () => {
+      openReviewGatePopup(context, {
+        message:
+          "Welcome to Review Gate V2! Please provide your review or feedback.",
+        title: "Review Gate",
+      });
+    }
+  );
+
+  // Register command to toggle sound notifications
+  let toggleSoundDisposable = vscode.commands.registerCommand(
+    "reviewGate.toggleSound",
+    () => {
+      const config = vscode.workspace.getConfiguration("reviewGate");
+      const currentSetting = config.get("enableSound", true);
+      const newSetting = !currentSetting;
+
+      config.update(
+        "enableSound",
+        newSetting,
+        vscode.ConfigurationTarget.Global
+      );
+
+      const statusMessage = newSetting
+        ? "Review Gate sound notifications enabled 🔔"
+        : "Review Gate sound notifications disabled 🔇";
+
+      vscode.window.showInformationMessage(statusMessage);
+
+      // Update any open chat panels
+      if (chatPanel) {
+        chatPanel.webview.postMessage({
+          command: "updateSoundSetting",
+          enabled: newSetting,
         });
-    });
+      }
+    }
+  );
 
-    context.subscriptions.push(disposable);
+  context.subscriptions.push(disposable);
+  context.subscriptions.push(toggleSoundDisposable);
 
-    // Start MCP status monitoring immediately
-    startMcpStatusMonitoring(context);
+  // Start MCP status monitoring immediately
+  startMcpStatusMonitoring(context);
 
-    // Start Review Gate integration immediately
-    startReviewGateIntegration(context);
-    
-    // Show activation notification
-    vscode.window.showInformationMessage('Review Gate V2 activated! Use Cmd+Shift+R or wait for MCP tool calls.');
+  // Start Review Gate integration immediately
+  startReviewGateIntegration(context);
+
+  // Show activation notification
+  vscode.window.showInformationMessage(
+    "Review Gate V2 activated! Use Cmd+Shift+R or wait for MCP tool calls."
+  );
 }
 
 function logMessage(message) {
-    const timestamp = new Date().toISOString();
-    const logMsg = `[${timestamp}] ${message}`;
-    console.log(logMsg);
-    if (outputChannel) {
-        outputChannel.appendLine(logMsg);
-        // Don't auto-show output channel to avoid stealing focus
-    }
+  const timestamp = new Date().toISOString();
+  const logMsg = `[${timestamp}] ${message}`;
+  console.log(logMsg);
+  if (outputChannel) {
+    outputChannel.appendLine(logMsg);
+    // Don't auto-show output channel to avoid stealing focus
+  }
 }
 
-function logUserInput(inputText, eventType = 'MESSAGE', triggerId = null, attachments = []) {
-    const timestamp = new Date().toISOString();
-    const logMsg = `[${timestamp}] ${eventType}: ${inputText}`;
-    console.log(`REVIEW GATE USER INPUT: ${inputText}`);
-    
-    if (outputChannel) {
-        outputChannel.appendLine(logMsg);
-    }
-    
-    // Write to file for external monitoring
-    try {
-        const logFile = getTempPath('review_gate_user_inputs.log');
-        fs.appendFileSync(logFile, `${logMsg}\n`);
-        
-        // Write response file for MCP server integration if we have a trigger ID
-        if (triggerId && eventType === 'MCP_RESPONSE') {
-            // Write multiple response file patterns for better compatibility
-            const responsePatterns = [
-                getTempPath(`review_gate_response_${triggerId}.json`),
-                getTempPath('review_gate_response.json'),  // Fallback generic response
-                getTempPath(`mcp_response_${triggerId}.json`),  // Alternative pattern
-                getTempPath('mcp_response.json')  // Generic MCP response
-            ];
-            
-            const responseData = {
-                timestamp: timestamp,
-                trigger_id: triggerId,
-                user_input: inputText,
-                response: inputText,  // Also provide as 'response' field
-                message: inputText,   // Also provide as 'message' field
-                attachments: attachments,  // Include image attachments
-                event_type: eventType,
-                source: 'review_gate_extension'
-            };
-            
-            const responseJson = JSON.stringify(responseData, null, 2);
-            
-            // Write to all response file patterns
-            responsePatterns.forEach(responseFile => {
-                try {
-                    fs.writeFileSync(responseFile, responseJson);
-                    logMessage(`MCP response written: ${responseFile}`);
-                } catch (writeError) {
-                    logMessage(`Failed to write response file ${responseFile}: ${writeError.message}`);
-                }
-            });
+function logUserInput(
+  inputText,
+  eventType = "MESSAGE",
+  triggerId = null,
+  attachments = []
+) {
+  const timestamp = new Date().toISOString();
+  const logMsg = `[${timestamp}] ${eventType}: ${inputText}`;
+  console.log(`REVIEW GATE USER INPUT: ${inputText}`);
+
+  if (outputChannel) {
+    outputChannel.appendLine(logMsg);
+  }
+
+  // Write to file for external monitoring
+  try {
+    const logFile = getTempPath("review_gate_user_inputs.log");
+    fs.appendFileSync(logFile, `${logMsg}\n`);
+
+    // Write response file for MCP server integration if we have a trigger ID
+    if (triggerId && eventType === "MCP_RESPONSE") {
+      // Write multiple response file patterns for better compatibility
+      const responsePatterns = [
+        getTempPath(`review_gate_response_${triggerId}.json`),
+        getTempPath("review_gate_response.json"), // Fallback generic response
+        getTempPath(`mcp_response_${triggerId}.json`), // Alternative pattern
+        getTempPath("mcp_response.json"), // Generic MCP response
+      ];
+
+      const responseData = {
+        timestamp: timestamp,
+        trigger_id: triggerId,
+        user_input: inputText,
+        response: inputText, // Also provide as 'response' field
+        message: inputText, // Also provide as 'message' field
+        attachments: attachments, // Include image attachments
+        event_type: eventType,
+        source: "review_gate_extension",
+      };
+
+      const responseJson = JSON.stringify(responseData, null, 2);
+
+      // Write to all response file patterns
+      responsePatterns.forEach((responseFile) => {
+        try {
+          fs.writeFileSync(responseFile, responseJson);
+          logMessage(`MCP response written: ${responseFile}`);
+        } catch (writeError) {
+          logMessage(
+            `Failed to write response file ${responseFile}: ${writeError.message}`
+          );
         }
-        
-    } catch (error) {
-        logMessage(`Could not write to Review Gate log file: ${error.message}`);
+      });
     }
+  } catch (error) {
+    logMessage(`Could not write to Review Gate log file: ${error.message}`);
+  }
 }
 
 function startMcpStatusMonitoring(context) {
-    // Silent start - no logging to avoid focus stealing
-    
-    // Check MCP status every 2 seconds
-    statusCheckInterval = setInterval(() => {
-        checkMcpStatus();
-    }, 2000);
-    
-    // Initial check
+  // Silent start - no logging to avoid focus stealing
+
+  // Check MCP status every 2 seconds
+  statusCheckInterval = setInterval(() => {
     checkMcpStatus();
-    
-    // Clean up on extension deactivation
-    context.subscriptions.push({
-        dispose: () => {
-            if (statusCheckInterval) {
-                clearInterval(statusCheckInterval);
-            }
-        }
-    });
+  }, 2000);
+
+  // Initial check
+  checkMcpStatus();
+
+  // Clean up on extension deactivation
+  context.subscriptions.push({
+    dispose: () => {
+      if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+      }
+    },
+  });
 }
 
 function checkMcpStatus() {
-    try {
-        // Check if MCP server log exists and is recent
-        const mcpLogPath = getTempPath('review_gate_v2.log');
-        if (fs.existsSync(mcpLogPath)) {
-            const stats = fs.statSync(mcpLogPath);
-            const now = Date.now();
-            const fileAge = now - stats.mtime.getTime();
-            
-            // Consider MCP active if log file was modified within last 30 seconds
-            const wasActive = mcpStatus;
-            mcpStatus = fileAge < 30000;
-            
-            if (wasActive !== mcpStatus) {
-                // Silent status change - only update UI
-                updateChatPanelStatus();
-            }
-        } else {
-            if (mcpStatus) {
-                mcpStatus = false;
-                updateChatPanelStatus();
-            }
-        }
-    } catch (error) {
-        if (mcpStatus) {
-            mcpStatus = false;
-            updateChatPanelStatus();
-        }
+  try {
+    // Check if MCP server log exists and is recent
+    const mcpLogPath = getTempPath("review_gate_v2.log");
+    if (fs.existsSync(mcpLogPath)) {
+      const stats = fs.statSync(mcpLogPath);
+      const now = Date.now();
+      const fileAge = now - stats.mtime.getTime();
+
+      // Consider MCP active if log file was modified within last 30 seconds
+      const wasActive = mcpStatus;
+      mcpStatus = fileAge < 30000;
+
+      if (wasActive !== mcpStatus) {
+        // Silent status change - only update UI
+        updateChatPanelStatus();
+      }
+    } else {
+      if (mcpStatus) {
+        mcpStatus = false;
+        updateChatPanelStatus();
+      }
     }
+  } catch (error) {
+    if (mcpStatus) {
+      mcpStatus = false;
+      updateChatPanelStatus();
+    }
+  }
 }
 
 function updateChatPanelStatus() {
-    if (chatPanel) {
-        chatPanel.webview.postMessage({
-            command: 'updateMcpStatus',
-            active: mcpStatus
-        });
-    }
+  if (chatPanel) {
+    chatPanel.webview.postMessage({
+      command: "updateMcpStatus",
+      active: mcpStatus,
+    });
+  }
 }
 
 function startReviewGateIntegration(context) {
-    // Silent integration start
-    
-    // Watch for Review Gate trigger file
-    const triggerFilePath = getTempPath('review_gate_trigger.json');
-    
-    // Check for existing trigger file first
+  // Silent integration start
+
+  // Watch for Review Gate trigger file
+  const triggerFilePath = getTempPath("review_gate_trigger.json");
+
+  // Check for existing trigger file first
+  checkTriggerFile(context, triggerFilePath);
+
+  // Use a more robust polling approach instead of fs.watchFile
+  // fs.watchFile can miss rapid file creation/deletion cycles
+  const pollInterval = setInterval(() => {
+    // Check main trigger file
     checkTriggerFile(context, triggerFilePath);
-    
-    // Use a more robust polling approach instead of fs.watchFile
-    // fs.watchFile can miss rapid file creation/deletion cycles
-    const pollInterval = setInterval(() => {
-        // Check main trigger file
-        checkTriggerFile(context, triggerFilePath);
-        
-        // Check backup trigger files
-        for (let i = 0; i < 3; i++) {
-            const backupTriggerPath = getTempPath(`review_gate_trigger_${i}.json`);
-            checkTriggerFile(context, backupTriggerPath);
-        }
-    }, 250); // Check every 250ms for better performance
-    
-    // Store the interval for cleanup
-    reviewGateWatcher = pollInterval;
-    
-    // Add to context subscriptions for proper cleanup
-    context.subscriptions.push({
-        dispose: () => {
-            if (pollInterval) {
-                clearInterval(pollInterval);
-            }
-        }
-    });
-    
-    // Immediate check on startup
-    setTimeout(() => {
-        checkTriggerFile(context, triggerFilePath);
-    }, 100);
-    
-    // Show notification that we're ready
-    vscode.window.showInformationMessage('Review Gate V2 MCP integration ready! Extension is monitoring for Cursor Agent tool calls...');
+
+    // Check backup trigger files
+    for (let i = 0; i < 3; i++) {
+      const backupTriggerPath = getTempPath(`review_gate_trigger_${i}.json`);
+      checkTriggerFile(context, backupTriggerPath);
+    }
+  }, 250); // Check every 250ms for better performance
+
+  // Store the interval for cleanup
+  reviewGateWatcher = pollInterval;
+
+  // Add to context subscriptions for proper cleanup
+  context.subscriptions.push({
+    dispose: () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
+    },
+  });
+
+  // Immediate check on startup
+  setTimeout(() => {
+    checkTriggerFile(context, triggerFilePath);
+  }, 100);
+
+  // Show notification that we're ready
+  vscode.window.showInformationMessage(
+    "Review Gate V2 MCP integration ready! Extension is monitoring for Cursor Agent tool calls..."
+  );
 }
 
 function checkTriggerFile(context, filePath) {
-    try {
-        if (fs.existsSync(filePath)) {
-            const data = fs.readFileSync(filePath, 'utf8');
-            const triggerData = JSON.parse(data);
-            
-            // Check if this is for Cursor and Review Gate
-            if (triggerData.editor && triggerData.editor !== 'cursor') {
-                return;
-            }
-            
-            if (triggerData.system && triggerData.system !== 'review-gate-v2') {
-                return;
-            }
-            
-            // Only log essential trigger info
-            console.log(`Review Gate triggered: ${triggerData.data.tool}`);
-            
-            // Store current trigger data for response handling
-            currentTriggerData = triggerData.data;
-            
-            handleReviewGateToolCall(context, triggerData.data);
-            
-            // Clean up trigger file immediately
-            try {
-                fs.unlinkSync(filePath);
-            } catch (cleanupError) {
-                // Silent cleanup error - only console log
-                console.log(`Could not clean trigger file: ${cleanupError.message}`);
-            }
-        }
-    } catch (error) {
-        if (error.code !== 'ENOENT') { // Don't log file not found errors
-            console.log(`Error reading trigger file: ${error.message}`);
-        }
+  try {
+    if (fs.existsSync(filePath)) {
+      const data = fs.readFileSync(filePath, "utf8");
+      const triggerData = JSON.parse(data);
+
+      // Check if this is for Cursor and Review Gate
+      if (triggerData.editor && triggerData.editor !== "cursor") {
+        return;
+      }
+
+      if (triggerData.system && triggerData.system !== "review-gate-v2") {
+        return;
+      }
+
+      // Only log essential trigger info
+      console.log(`Review Gate triggered: ${triggerData.data.tool}`);
+
+      // Store current trigger data for response handling
+      currentTriggerData = triggerData.data;
+
+      handleReviewGateToolCall(context, triggerData.data);
+
+      // Clean up trigger file immediately
+      try {
+        fs.unlinkSync(filePath);
+      } catch (cleanupError) {
+        // Silent cleanup error - only console log
+        console.log(`Could not clean trigger file: ${cleanupError.message}`);
+      }
     }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      // Don't log file not found errors
+      console.log(`Error reading trigger file: ${error.message}`);
+    }
+  }
 }
 
 function handleReviewGateToolCall(context, toolData) {
-    // Silent tool call processing
-    
-    let popupOptions = {};
-    
-    switch (toolData.tool) {
-        case 'review_gate':
-            // UNIFIED: New unified tool that handles all modes
-            const mode = toolData.mode || 'chat';
-            let modeTitle = `Review Gate V2 - ${mode.charAt(0).toUpperCase() + mode.slice(1)} Mode`;
-            if (toolData.unified_tool) {
-                modeTitle = `Review Gate V2 ゲート - Unified (${mode})`;
-            }
-            
-            popupOptions = {
-                message: toolData.message || "Please provide your input:",
-                title: toolData.title || modeTitle,
-                autoFocus: true,
-                toolData: toolData,
-                mcpIntegration: true,
-                specialHandling: `unified_${mode}`
-            };
-            break;
-            
-        case 'review_gate_chat':
-            popupOptions = {
-                message: toolData.message || "Please provide your review or feedback:",
-                title: toolData.title || "Review Gate V2 - ゲート",
-                autoFocus: true,
-                toolData: toolData,
-                mcpIntegration: true
-            };
-            break;
-            
-        case 'quick_review':
-            popupOptions = {
-                message: toolData.prompt || "Quick feedback needed:",
-                title: toolData.title || "Review Gate V2 ゲート - Quick Review",
-                autoFocus: true,
-                toolData: toolData,
-                mcpIntegration: true,
-                specialHandling: 'quick_review'
-            };
-            break;
-            
-        case 'ingest_text':
-            popupOptions = {
-                message: `Cursor Agent received text input and needs your feedback:\n\n**Text Content:** ${toolData.text_content}\n**Source:** ${toolData.source}\n**Context:** ${toolData.context || 'None'}\n**Processing Mode:** ${toolData.processing_mode}\n\nPlease review and provide your feedback:`,
-                title: toolData.title || "Review Gate V2 ゲート - Text Input",
-                autoFocus: true,
-                toolData: toolData,
-                mcpIntegration: true
-            };
-            break;
-            
-        case 'shutdown_mcp':
-            popupOptions = {
-                message: `Cursor Agent is requesting to shutdown the MCP server:\n\n**Reason:** ${toolData.reason}\n**Immediate:** ${toolData.immediate ? 'Yes' : 'No'}\n**Cleanup:** ${toolData.cleanup ? 'Yes' : 'No'}\n\nType 'CONFIRM' to proceed with shutdown, or provide alternative instructions:`,
-                title: toolData.title || "Review Gate V2 ゲート - Shutdown Confirmation",
-                autoFocus: true,
-                toolData: toolData,
-                mcpIntegration: true,
-                specialHandling: 'shutdown_mcp'
-            };
-            break;
-            
-        case 'file_review':
-            popupOptions = {
-                message: toolData.instruction || "Cursor Agent needs you to select files:",
-                title: toolData.title || "Review Gate V2 ゲート - File Review",
-                autoFocus: true,
-                toolData: toolData,
-                mcpIntegration: true
-            };
-            break;
-            
-        default:
-            popupOptions = {
-                message: toolData.message || toolData.prompt || toolData.instruction || "Cursor Agent needs your input. Please provide your response:",
-                title: toolData.title || "Review Gate V2 ゲート - General Input",
-                autoFocus: true,
-                toolData: toolData,
-                mcpIntegration: true
-            };
-    }
-    
-    // Add trigger ID to popup options
-    popupOptions.triggerId = toolData.trigger_id;
-    console.log(`🔍 DEBUG: Setting popup triggerId to: ${toolData.trigger_id}`);
-    
-    // Force consistent title regardless of tool call
-    popupOptions.title = "Review Gate";
-    
-    // Immediately open Review Gate popup when tools are triggered by Cursor Agent
-    openReviewGatePopup(context, popupOptions);
-    
-    // FIXED: Send acknowledgement to MCP server that popup was activated
-    sendExtensionAcknowledgement(toolData.trigger_id, toolData.tool);
-    
-    // Show appropriate notification
-    const toolDisplayName = toolData.tool.replace('_', ' ').toUpperCase();
-    vscode.window.showInformationMessage(`Cursor Agent triggered "${toolDisplayName}" - Review Gate popup opened for your input!`);
+  // Silent tool call processing
+
+  let popupOptions = {};
+
+  switch (toolData.tool) {
+    case "review_gate":
+      // UNIFIED: New unified tool that handles all modes
+      const mode = toolData.mode || "chat";
+      let modeTitle = `Review Gate V2 - ${
+        mode.charAt(0).toUpperCase() + mode.slice(1)
+      } Mode`;
+      if (toolData.unified_tool) {
+        modeTitle = `Review Gate V2 ゲート - Unified (${mode})`;
+      }
+
+      popupOptions = {
+        message: toolData.message || "Please provide your input:",
+        title: toolData.title || modeTitle,
+        autoFocus: true,
+        toolData: toolData,
+        mcpIntegration: true,
+        specialHandling: `unified_${mode}`,
+      };
+      break;
+
+    case "review_gate_chat":
+      popupOptions = {
+        message: toolData.message || "Please provide your review or feedback:",
+        title: toolData.title || "Review Gate V2 - ゲート",
+        autoFocus: true,
+        toolData: toolData,
+        mcpIntegration: true,
+      };
+      break;
+
+    case "quick_review":
+      popupOptions = {
+        message: toolData.prompt || "Quick feedback needed:",
+        title: toolData.title || "Review Gate V2 ゲート - Quick Review",
+        autoFocus: true,
+        toolData: toolData,
+        mcpIntegration: true,
+        specialHandling: "quick_review",
+      };
+      break;
+
+    case "ingest_text":
+      popupOptions = {
+        message: `Cursor Agent received text input and needs your feedback:\n\n**Text Content:** ${
+          toolData.text_content
+        }\n**Source:** ${toolData.source}\n**Context:** ${
+          toolData.context || "None"
+        }\n**Processing Mode:** ${
+          toolData.processing_mode
+        }\n\nPlease review and provide your feedback:`,
+        title: toolData.title || "Review Gate V2 ゲート - Text Input",
+        autoFocus: true,
+        toolData: toolData,
+        mcpIntegration: true,
+      };
+      break;
+
+    case "shutdown_mcp":
+      popupOptions = {
+        message: `Cursor Agent is requesting to shutdown the MCP server:\n\n**Reason:** ${
+          toolData.reason
+        }\n**Immediate:** ${toolData.immediate ? "Yes" : "No"}\n**Cleanup:** ${
+          toolData.cleanup ? "Yes" : "No"
+        }\n\nType 'CONFIRM' to proceed with shutdown, or provide alternative instructions:`,
+        title:
+          toolData.title || "Review Gate V2 ゲート - Shutdown Confirmation",
+        autoFocus: true,
+        toolData: toolData,
+        mcpIntegration: true,
+        specialHandling: "shutdown_mcp",
+      };
+      break;
+
+    case "file_review":
+      popupOptions = {
+        message:
+          toolData.instruction || "Cursor Agent needs you to select files:",
+        title: toolData.title || "Review Gate V2 ゲート - File Review",
+        autoFocus: true,
+        toolData: toolData,
+        mcpIntegration: true,
+      };
+      break;
+
+    default:
+      popupOptions = {
+        message:
+          toolData.message ||
+          toolData.prompt ||
+          toolData.instruction ||
+          "Cursor Agent needs your input. Please provide your response:",
+        title: toolData.title || "Review Gate V2 ゲート - General Input",
+        autoFocus: true,
+        toolData: toolData,
+        mcpIntegration: true,
+      };
+  }
+
+  // Add trigger ID to popup options
+  popupOptions.triggerId = toolData.trigger_id;
+  console.log(`🔍 DEBUG: Setting popup triggerId to: ${toolData.trigger_id}`);
+
+  // Force consistent title regardless of tool call
+  popupOptions.title = "Review Gate";
+
+  // Immediately open Review Gate popup when tools are triggered by Cursor Agent
+  openReviewGatePopup(context, popupOptions);
+
+  // FIXED: Send acknowledgement to MCP server that popup was activated
+  sendExtensionAcknowledgement(toolData.trigger_id, toolData.tool);
+
+  // Show appropriate notification
+  const toolDisplayName = toolData.tool.replace("_", " ").toUpperCase();
+  vscode.window.showInformationMessage(
+    `Cursor Agent triggered "${toolDisplayName}" - Review Gate popup opened for your input!`
+  );
 }
 
 function sendExtensionAcknowledgement(triggerId, toolType) {
-    try {
-        const timestamp = new Date().toISOString();
-        const ackData = {
-            acknowledged: true,
-            timestamp: timestamp,
-            trigger_id: triggerId,
-            tool_type: toolType,
-            extension: 'review-gate-v2',
-            popup_activated: true
-        };
-        
-        const ackFile = getTempPath(`review_gate_ack_${triggerId}.json`);
-        fs.writeFileSync(ackFile, JSON.stringify(ackData, null, 2));
-        
-        // Silent acknowledgement 
-        
-    } catch (error) {
-        console.log(`Could not send extension acknowledgement: ${error.message}`);
-    }
+  try {
+    const timestamp = new Date().toISOString();
+    const ackData = {
+      acknowledged: true,
+      timestamp: timestamp,
+      trigger_id: triggerId,
+      tool_type: toolType,
+      extension: "review-gate-v2",
+      popup_activated: true,
+    };
+
+    const ackFile = getTempPath(`review_gate_ack_${triggerId}.json`);
+    fs.writeFileSync(ackFile, JSON.stringify(ackData, null, 2));
+
+    // Silent acknowledgement
+  } catch (error) {
+    console.log(`Could not send extension acknowledgement: ${error.message}`);
+  }
 }
 
 function openReviewGatePopup(context, options = {}) {
-    const {
-        message = "Welcome to Review Gate V2! Please provide your review or feedback.",
-        title = "Review Gate",
-        autoFocus = false,
-        toolData = null,
-        mcpIntegration = false,
-        triggerId = null,
-        specialHandling = null
-    } = options;
-    
-    // Store trigger ID in current trigger data for use in message handlers
-    console.log(`🔍 DEBUG: openReviewGatePopup triggerId: ${triggerId}`);
-    console.log(`🔍 DEBUG: openReviewGatePopup toolData:`, toolData);
-    if (triggerId) {
-        currentTriggerData = { ...toolData, trigger_id: triggerId };
-        console.log(`🔍 DEBUG: Set currentTriggerData:`, currentTriggerData);
-    } else {
-        console.log(`🔍 DEBUG: No triggerId provided, currentTriggerData not updated`);
+  const {
+    message = "Welcome to Review Gate V2! Please provide your review or feedback.",
+    title = "Review Gate",
+    autoFocus = false,
+    toolData = null,
+    mcpIntegration = false,
+    triggerId = null,
+    specialHandling = null,
+  } = options;
+
+  // Get sound setting
+  const config = vscode.workspace.getConfiguration("reviewGate");
+  const soundEnabled = config.get("enableSound", true);
+
+  // Store trigger ID in current trigger data for use in message handlers
+  console.log(`🔍 DEBUG: openReviewGatePopup triggerId: ${triggerId}`);
+  console.log(`🔍 DEBUG: openReviewGatePopup toolData:`, toolData);
+  if (triggerId) {
+    currentTriggerData = { ...toolData, trigger_id: triggerId };
+    console.log(`🔍 DEBUG: Set currentTriggerData:`, currentTriggerData);
+  } else {
+    console.log(
+      `🔍 DEBUG: No triggerId provided, currentTriggerData not updated`
+    );
+  }
+
+  // Silent popup opening
+
+  if (chatPanel) {
+    chatPanel.reveal(vscode.ViewColumn.One);
+    // Always use consistent title
+    chatPanel.title = "Review Gate";
+
+    // Set MCP status to active when revealing panel for new input
+    if (mcpIntegration) {
+      setTimeout(() => {
+        chatPanel.webview.postMessage({
+          command: "updateMcpStatus",
+          active: true,
+        });
+      }, 100);
     }
 
-    // Silent popup opening
-
-    if (chatPanel) {
-        chatPanel.reveal(vscode.ViewColumn.One);
-        // Always use consistent title
-        chatPanel.title = "Review Gate";
-        
-        // Set MCP status to active when revealing panel for new input
-        if (mcpIntegration) {
-            setTimeout(() => {
-                chatPanel.webview.postMessage({
-                    command: 'updateMcpStatus',
-                    active: true
-                });
-            }, 100);
-        }
-        
-        // Don't send redundant messages to existing panels
-        // The initial ready handler will show the message if needed
-        
-        // Auto-focus if requested
-        if (autoFocus) {
-            setTimeout(() => {
-                chatPanel.webview.postMessage({
-                    command: 'focus'
-                });
-            }, 200);
-        }
-        
-        return;
-    }
-
-    // Create webview panel
-    chatPanel = vscode.window.createWebviewPanel(
-        'reviewGateChat',
-        title,
-        vscode.ViewColumn.One,
-        {
-            enableScripts: true,
-            retainContextWhenHidden: true
-        }
-    );
-
-    // Set the HTML content
-    chatPanel.webview.html = getReviewGateHTML(title, mcpIntegration);
-
-    // Handle messages from webview
-    chatPanel.webview.onDidReceiveMessage(
-        webviewMessage => {
-            // Get trigger ID from current trigger data or passed options
-            const currentTriggerId = (currentTriggerData && currentTriggerData.trigger_id) || triggerId;
-            console.log(`🔍 DEBUG: Speech command - currentTriggerData:`, currentTriggerData);
-            console.log(`🔍 DEBUG: Speech command - triggerId:`, triggerId);
-            console.log(`🔍 DEBUG: Speech command - currentTriggerId:`, currentTriggerId);
-            
-            switch (webviewMessage.command) {
-                case 'send':
-                    
-                    // Log the user input and write response file for MCP integration
-                    const eventType = mcpIntegration ? 'MCP_RESPONSE' : 'REVIEW_SUBMITTED';
-                    logUserInput(webviewMessage.text, eventType, currentTriggerId, webviewMessage.attachments || []);
-                    
-                    handleReviewMessage(webviewMessage.text, webviewMessage.attachments, currentTriggerId, mcpIntegration, specialHandling);
-                    break;
-                case 'attach':
-                    logUserInput('User clicked attachment button', 'ATTACHMENT_CLICK', currentTriggerId);
-                    handleFileAttachment(currentTriggerId);
-                    break;
-                case 'uploadImage':
-                    logUserInput('User clicked image upload button', 'IMAGE_UPLOAD_CLICK', currentTriggerId);
-                    handleImageUpload(currentTriggerId);
-                    break;
-                case 'logPastedImage':
-                    logUserInput(`Image pasted from clipboard: ${webviewMessage.fileName} (${webviewMessage.size} bytes, ${webviewMessage.mimeType})`, 'IMAGE_PASTED', currentTriggerId);
-                    break;
-                case 'logDragDropImage':
-                    logUserInput(`Image dropped from drag and drop: ${webviewMessage.fileName} (${webviewMessage.size} bytes, ${webviewMessage.mimeType})`, 'IMAGE_DROPPED', currentTriggerId);
-                    break;
-                case 'logImageRemoved':
-                    logUserInput(`Image removed: ${webviewMessage.imageId}`, 'IMAGE_REMOVED', currentTriggerId);
-                    break;
-                case 'startRecording':
-                    logUserInput('User started speech recording', 'SPEECH_START', currentTriggerId);
-                    startNodeRecording(currentTriggerId);
-                    break;
-                case 'stopRecording':
-                    logUserInput('User stopped speech recording', 'SPEECH_STOP', currentTriggerId);
-                    stopNodeRecording(currentTriggerId);
-                    break;
-                case 'showError':
-                    vscode.window.showErrorMessage(webviewMessage.message);
-                    break;
-                case 'ready':
-                    // Send initial MCP status
-                    // For MCP integrations, show as active when waiting for input
-                    chatPanel.webview.postMessage({
-                        command: 'updateMcpStatus',
-                        active: mcpIntegration ? true : mcpStatus
-                    });
-                    // Only send welcome message for manual opens, not MCP tool calls
-                    // This prevents duplicate messages from repeated tool calls
-                    if (message && !mcpIntegration && !message.includes("I have completed")) {
-                        chatPanel.webview.postMessage({
-                            command: 'addMessage',
-                            text: message,
-                            type: 'system',
-                            plain: true,
-                            toolData: toolData,
-                            mcpIntegration: mcpIntegration,
-                            triggerId: triggerId,
-                            specialHandling: specialHandling
-                        });
-                    }
-                    break;
-            }
-        },
-        undefined,
-        context.subscriptions
-    );
-
-    // Clean up when panel is closed
-    chatPanel.onDidDispose(
-        () => {
-            chatPanel = null;
-            currentTriggerData = null;
-        },
-        null,
-        context.subscriptions
-    );
+    // Don't send redundant messages to existing panels
+    // The initial ready handler will show the message if needed
 
     // Auto-focus if requested
     if (autoFocus) {
-        setTimeout(() => {
-            chatPanel.webview.postMessage({
-                command: 'focus'
-            });
-        }, 200);
+      setTimeout(() => {
+        chatPanel.webview.postMessage({
+          command: "focus",
+        });
+      }, 200);
     }
+
+    return;
+  }
+
+  // Create webview panel
+  chatPanel = vscode.window.createWebviewPanel(
+    "reviewGateChat",
+    title,
+    vscode.ViewColumn.One,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+    }
+  );
+
+  // Set the HTML content
+  chatPanel.webview.html = getReviewGateHTML(
+    title,
+    mcpIntegration,
+    soundEnabled,
+    context
+  );
+
+  // Handle messages from webview
+  chatPanel.webview.onDidReceiveMessage(
+    (webviewMessage) => {
+      // Get trigger ID from current trigger data or passed options
+      const currentTriggerId =
+        (currentTriggerData && currentTriggerData.trigger_id) || triggerId;
+      console.log(
+        `🔍 DEBUG: Speech command - currentTriggerData:`,
+        currentTriggerData
+      );
+      console.log(`🔍 DEBUG: Speech command - triggerId:`, triggerId);
+      console.log(
+        `🔍 DEBUG: Speech command - currentTriggerId:`,
+        currentTriggerId
+      );
+
+      switch (webviewMessage.command) {
+        case "send":
+          // Log the user input and write response file for MCP integration
+          const eventType = mcpIntegration
+            ? "MCP_RESPONSE"
+            : "REVIEW_SUBMITTED";
+          logUserInput(
+            webviewMessage.text,
+            eventType,
+            currentTriggerId,
+            webviewMessage.attachments || []
+          );
+
+          handleReviewMessage(
+            webviewMessage.text,
+            webviewMessage.attachments,
+            currentTriggerId,
+            mcpIntegration,
+            specialHandling
+          );
+          break;
+        case "attach":
+          logUserInput(
+            "User clicked attachment button",
+            "ATTACHMENT_CLICK",
+            currentTriggerId
+          );
+          handleFileAttachment(currentTriggerId);
+          break;
+        case "uploadImage":
+          logUserInput(
+            "User clicked image upload button",
+            "IMAGE_UPLOAD_CLICK",
+            currentTriggerId
+          );
+          handleImageUpload(currentTriggerId);
+          break;
+        case "logPastedImage":
+          logUserInput(
+            `Image pasted from clipboard: ${webviewMessage.fileName} (${webviewMessage.size} bytes, ${webviewMessage.mimeType})`,
+            "IMAGE_PASTED",
+            currentTriggerId
+          );
+          break;
+        case "logDragDropImage":
+          logUserInput(
+            `Image dropped from drag and drop: ${webviewMessage.fileName} (${webviewMessage.size} bytes, ${webviewMessage.mimeType})`,
+            "IMAGE_DROPPED",
+            currentTriggerId
+          );
+          break;
+        case "logImageRemoved":
+          logUserInput(
+            `Image removed: ${webviewMessage.imageId}`,
+            "IMAGE_REMOVED",
+            currentTriggerId
+          );
+          break;
+        case "startRecording":
+          logUserInput(
+            "User started speech recording",
+            "SPEECH_START",
+            currentTriggerId
+          );
+          startNodeRecording(currentTriggerId);
+          break;
+        case "stopRecording":
+          logUserInput(
+            "User stopped speech recording",
+            "SPEECH_STOP",
+            currentTriggerId
+          );
+          stopNodeRecording(currentTriggerId);
+          break;
+        case "showError":
+          vscode.window.showErrorMessage(webviewMessage.message);
+          break;
+        case "toggleSound":
+          console.log("🔊 Sound toggle from webview:", webviewMessage.enabled);
+          // Update the configuration setting
+          const config = vscode.workspace.getConfiguration("reviewGate");
+          config.update(
+            "enableSound",
+            webviewMessage.enabled,
+            vscode.ConfigurationTarget.Global
+          );
+          break;
+        case "ready":
+          // Send initial MCP status
+          // For MCP integrations, show as active when waiting for input
+          chatPanel.webview.postMessage({
+            command: "updateMcpStatus",
+            active: mcpIntegration ? true : mcpStatus,
+          });
+          // Only send welcome message for manual opens, not MCP tool calls
+          // This prevents duplicate messages from repeated tool calls
+          if (
+            message &&
+            !mcpIntegration &&
+            !message.includes("I have completed")
+          ) {
+            chatPanel.webview.postMessage({
+              command: "addMessage",
+              text: message,
+              type: "system",
+              plain: true,
+              toolData: toolData,
+              mcpIntegration: mcpIntegration,
+              triggerId: triggerId,
+              specialHandling: specialHandling,
+            });
+          }
+          break;
+      }
+    },
+    undefined,
+    context.subscriptions
+  );
+
+  // Clean up when panel is closed
+  chatPanel.onDidDispose(
+    () => {
+      chatPanel = null;
+      currentTriggerData = null;
+    },
+    null,
+    context.subscriptions
+  );
+
+  // Auto-focus if requested
+  if (autoFocus) {
+    setTimeout(() => {
+      chatPanel.webview.postMessage({
+        command: "focus",
+      });
+    }, 200);
+  }
 }
 
-function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
-    return `<!DOCTYPE html>
+function getReviewGateHTML(
+  title = "Review Gate",
+  mcpIntegration = false,
+  soundEnabled = true,
+  context = null
+) {
+  // Check for ding.mp3 sound file
+  let dingSoundSrc = null;
+  if (context) {
+    const dingSoundPath = path.join(context.extensionPath, "ding.mp3");
+    if (fs.existsSync(dingSoundPath)) {
+      // Convert to webview URI
+      const dingSoundUri = vscode.Uri.file(dingSoundPath);
+      dingSoundSrc = dingSoundUri.toString();
+      console.log("🎵 Ding sound file found:", dingSoundPath);
+    }
+  }
+
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -996,6 +1154,76 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
         .remove-image-btn:active {
             transform: scale(0.95);
         }
+        
+        /* Countdown Timer Styles */
+        .countdown-timer {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--vscode-charts-orange);
+            opacity: 0.8;
+            margin-left: 8px;
+            padding: 4px 8px;
+            background: rgba(255, 165, 0, 0.1);
+            border-radius: 4px;
+            border: 1px solid rgba(255, 165, 0, 0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .countdown-timer.warning {
+            color: var(--vscode-charts-red);
+            background: rgba(255, 59, 48, 0.1);
+            border-color: rgba(255, 59, 48, 0.3);
+            animation: timerPulse 1s ease-in-out infinite alternate;
+        }
+        
+        .countdown-timer.expired {
+            color: var(--vscode-errorForeground);
+            background: rgba(255, 59, 48, 0.2);
+            border-color: rgba(255, 59, 48, 0.5);
+            animation: timerExpired 0.5s ease-in-out infinite alternate;
+        }
+        
+        @keyframes timerPulse {
+            0% { opacity: 0.8; }
+            100% { opacity: 1; }
+        }
+        
+        @keyframes timerExpired {
+            0% { opacity: 0.6; }
+            100% { opacity: 1; }
+        }
+        
+        .countdown-timer:hover {
+            opacity: 1;
+            transform: scale(1.02);
+        }
+        
+        .countdown-timer .timer-icon {
+            margin-right: 4px;
+            font-size: 10px;
+        }
+        
+        /* Sound Toggle Styles */
+        .sound-toggle {
+            font-size: 12px;
+            color: var(--vscode-foreground);
+            opacity: 0.7;
+            margin-left: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+        
+        .sound-toggle:hover {
+            opacity: 1;
+            background: rgba(255, 165, 0, 0.1);
+        }
+        
+        .sound-toggle.disabled {
+            opacity: 0.4;
+            color: var(--vscode-errorForeground);
+        }
     </style>
 </head>
 <body>
@@ -1004,8 +1232,27 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
             <div class="review-title">${title}</div>
             <div class="status-indicator" id="statusIndicator"></div>
             <div class="mcp-status" id="mcpStatus">Checking MCP...</div>
+            <div class="countdown-timer" id="countdownTimer" style="display: none;">
+                <i class="fas fa-clock timer-icon"></i>
+                <span id="timerDisplay">5:00</span>
+            </div>
+            <div class="sound-toggle" id="soundToggle" title="Click to toggle sound notifications">
+                <i class="fas fa-volume-up" id="soundIcon"></i>
+            </div>
             <div class="review-author">by Lakshman Turlapati</div>
         </div>
+        
+        <!-- Ding sound audio element -->
+        ${
+          dingSoundSrc
+            ? `
+        <audio id="dingSound" preload="auto" style="display: none;">
+            <source src="${dingSoundSrc}" type="audio/mp3">
+        </audio>
+        `
+            : ""
+        }
+
         
         <div class="messages-container" id="messages">
             <!-- Messages will be added here -->
@@ -1023,12 +1270,18 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
         <div class="input-container" id="inputContainer">
             <div class="input-wrapper">
                 <i id="micIcon" class="fas fa-microphone mic-icon active" title="Click to speak"></i>
-                <textarea id="messageInput" class="message-input" placeholder="${mcpIntegration ? 'Cursor Agent is waiting for your response...' : 'Type your review or feedback...'}" rows="1"></textarea>
+                <textarea id="messageInput" class="message-input" placeholder="${
+                  mcpIntegration
+                    ? "Cursor Agent is waiting for your response..."
+                    : "Type your review or feedback..."
+                }" rows="1"></textarea>
                 <button id="attachButton" class="attach-button" title="Upload image">
                     <i class="fas fa-image"></i>
                 </button>
             </div>
-            <button id="sendButton" class="send-button" title="Send ${mcpIntegration ? 'response to Agent' : 'review'}">
+            <button id="sendButton" class="send-button" title="Send ${
+              mcpIntegration ? "response to Agent" : "review"
+            }">
                 <i class="fas fa-arrow-up"></i>
             </button>
         </div>
@@ -1046,6 +1299,11 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
         const statusIndicator = document.getElementById('statusIndicator');
         const mcpStatus = document.getElementById('mcpStatus');
         const inputContainer = document.getElementById('inputContainer');
+        const countdownTimer = document.getElementById('countdownTimer');
+        const timerDisplay = document.getElementById('timerDisplay');
+        const dingSound = document.getElementById('dingSound');
+        const soundToggle = document.getElementById('soundToggle');
+        const soundIcon = document.getElementById('soundIcon');
         
         let messageCount = 0;
         let mcpActive = true; // Default to true for better UX
@@ -1053,6 +1311,50 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
         let attachedImages = []; // Store uploaded images
         let isRecording = false;
         let mediaRecorder = null;
+        
+        // Countdown Timer Variables
+        let countdownInterval = null;
+        let timeRemaining = 300; // 5 minutes in seconds
+        let timerActive = false;
+        
+        // Sound Settings
+        let soundEnabled = ${soundEnabled};
+        let hasDingSound = ${dingSoundSrc ? "true" : "false"};
+        
+        // Initialize sound toggle UI
+        function initializeSoundToggle() {
+            updateSoundToggleUI();
+            
+            // Add click event listener for sound toggle
+            soundToggle.addEventListener('click', toggleSound);
+        }
+        
+        function updateSoundToggleUI() {
+            if (soundEnabled) {
+                soundIcon.className = 'fas fa-volume-up';
+                soundToggle.classList.remove('disabled');
+                soundToggle.title = 'Sound enabled - Click to disable';
+            } else {
+                soundIcon.className = 'fas fa-volume-mute';
+                soundToggle.classList.add('disabled');
+                soundToggle.title = 'Sound disabled - Click to enable';
+            }
+        }
+        
+        function toggleSound() {
+            soundEnabled = !soundEnabled;
+            updateSoundToggleUI();
+            
+            // Send message to extension to update the setting
+            vscode.postMessage({
+                command: 'toggleSound',
+                enabled: soundEnabled
+            });
+            
+            // Show visual feedback
+            const feedbackMessage = soundEnabled ? '🔔 Sound enabled' : '🔇 Sound disabled';
+            addMessage(feedbackMessage, 'system', null, true);
+        }
         
         function updateMcpStatus(active) {
             mcpActive = active;
@@ -1073,6 +1375,96 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
                 sendButton.disabled = true;
                 attachButton.disabled = true;
                 messageInput.placeholder = 'MCP server is not active. Please start the server to enable input.';
+            }
+        }
+        
+        // Countdown Timer Functions
+        function startCountdownTimer() {
+            if (timerActive) {
+                stopCountdownTimer();
+            }
+            
+            timeRemaining = 300; // Reset to 5 minutes
+            timerActive = true;
+            countdownTimer.style.display = 'block';
+            
+            updateTimerDisplay();
+            
+            countdownInterval = setInterval(() => {
+                timeRemaining--;
+                updateTimerDisplay();
+                
+                if (timeRemaining <= 0) {
+                    expireTimer();
+                }
+            }, 1000);
+        }
+        
+        function stopCountdownTimer() {
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            timerActive = false;
+            countdownTimer.style.display = 'none';
+            countdownTimer.classList.remove('warning', 'expired');
+        }
+        
+        function updateTimerDisplay() {
+            const minutes = Math.floor(timeRemaining / 60);
+            const seconds = timeRemaining % 60;
+            timerDisplay.textContent = \`\${minutes}:\${seconds.toString().padStart(2, '0')}\`;
+            
+            // Change styling based on time remaining
+            if (timeRemaining <= 0) {
+                countdownTimer.classList.add('expired');
+                countdownTimer.classList.remove('warning');
+            } else if (timeRemaining <= 60) {
+                countdownTimer.classList.add('warning');
+                countdownTimer.classList.remove('expired');
+            } else {
+                countdownTimer.classList.remove('warning', 'expired');
+            }
+        }
+        
+        function expireTimer() {
+            stopCountdownTimer();
+            countdownTimer.style.display = 'block';
+            countdownTimer.classList.add('expired');
+            timerDisplay.textContent = 'EXPIRED';
+            
+            // Add expired message to chat
+            addMessage('⏰ Response timer expired (5 minutes). Please respond as soon as possible.', 'system', null, true);
+        }
+        
+        function playDingSound() {
+            if (!soundEnabled) {
+                console.log('🔇 Sound is disabled - ding sound not played');
+                return;
+            }
+            
+            if (!hasDingSound || !dingSound) {
+                console.log('🔇 No ding.mp3 file found - sound not available');
+                return;
+            }
+            
+            try {
+                // Reset the audio to the beginning
+                dingSound.currentTime = 0;
+                
+                // Play the ding sound
+                const playPromise = dingSound.play();
+                
+                // Handle promise-based play() method
+                if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                        console.log('🔔 Ding sound played successfully');
+                    }).catch(error => {
+                        console.log('🔇 Could not play ding sound:', error.message);
+                    });
+                }
+            } catch (error) {
+                console.log('🔇 Audio play error:', error.message);
             }
         }
         
@@ -1148,6 +1540,9 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
         function sendMessage() {
             const text = messageInput.value.trim();
             if (!text && attachedImages.length === 0) return;
+            
+            // Stop countdown timer when message is sent
+            stopCountdownTimer();
             
             // Create message with text and images
             let displayMessage = text;
@@ -1518,13 +1913,27 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
                     if (message.mcpIntegration) {
                         mcpIntegration = true;
                         messageInput.placeholder = 'Cursor Agent is waiting for your response...';
+                        // Start countdown timer for new MCP messages
+                        startCountdownTimer();
                     }
                     break;
                 case 'focus':
                     messageInput.focus();
+                    // Play ding sound when focus is requested (MCP call)
+                    playDingSound();
+                    // Start countdown timer for MCP integrations
+                    if (mcpIntegration) {
+                        startCountdownTimer();
+                    }
                     break;
                 case 'updateMcpStatus':
                     updateMcpStatus(message.active);
+                    // Start timer when MCP becomes active for integrations
+                    if (message.active && mcpIntegration) {
+                        startCountdownTimer();
+                    } else if (!message.active) {
+                        stopCountdownTimer();
+                    }
                     break;
                 case 'imageUploaded':
                     handleImageUploaded(message.imageData);
@@ -1569,6 +1978,10 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
                         }, 3000);
                     }
                     break;
+                case 'updateSoundSetting':
+                    soundEnabled = message.enabled;
+                    updateSoundToggleUI();
+                    break;
             }
         });
         
@@ -1594,6 +2007,7 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
         // Initialize
         vscode.postMessage({ command: 'ready' });
         initializeSpeech();
+        initializeSoundToggle();
         
         // Focus input immediately
         setTimeout(() => {
@@ -1604,636 +2018,729 @@ function getReviewGateHTML(title = "Review Gate", mcpIntegration = false) {
 </html>`;
 }
 
-function handleReviewMessage(text, attachments, triggerId, mcpIntegration, specialHandling) {
-    // Funny response templates - randomly rotated
-    const funnyResponses = [
-        "Review sent - Hold on to your pants until the review gate is called again! 🎢",
-        "Message delivered! Agent is probably doing agent things now... ⚡",
-        "Your wisdom has been transmitted to the digital overlords! 🤖",
-        "Response launched into the void - expect agent magic soon! ✨",
-        "Review gate closed - Agent is chewing on your input! 🍕",
-        "Message received and filed under 'Probably Important'! 📁",
-        "Your input is now part of the agent's master plan! 🧠",
-        "Review sent - The agent owes you one! 🤝",
-        "Success! Your thoughts are now haunting the agent's dreams! 👻",
-        "Delivered faster than pizza on a Friday night! 🍕"
-    ];
-    
-    // Silent message processing
-    
-    // Handle special cases for different tool types
-    if (specialHandling === 'shutdown_mcp') {
-        if (text.toUpperCase().includes('CONFIRM') || text.toUpperCase() === 'YES') {
-            logUserInput(`SHUTDOWN CONFIRMED: ${text}`, 'SHUTDOWN_CONFIRMED', triggerId);
-            
-            // Send confirmation response
+function handleReviewMessage(
+  text,
+  attachments,
+  triggerId,
+  mcpIntegration,
+  specialHandling
+) {
+  // Funny response templates - randomly rotated
+  const funnyResponses = [
+    "Review sent - Hold on to your pants until the review gate is called again! 🎢",
+    "Message delivered! Agent is probably doing agent things now... ⚡",
+    "Your wisdom has been transmitted to the digital overlords! 🤖",
+    "Response launched into the void - expect agent magic soon! ✨",
+    "Review gate closed - Agent is chewing on your input! 🍕",
+    "Message received and filed under 'Probably Important'! 📁",
+    "Your input is now part of the agent's master plan! 🧠",
+    "Review sent - The agent owes you one! 🤝",
+    "Success! Your thoughts are now haunting the agent's dreams! 👻",
+    "Delivered faster than pizza on a Friday night! 🍕",
+  ];
+
+  // Silent message processing
+
+  // Handle special cases for different tool types
+  if (specialHandling === "shutdown_mcp") {
+    if (
+      text.toUpperCase().includes("CONFIRM") ||
+      text.toUpperCase() === "YES"
+    ) {
+      logUserInput(
+        `SHUTDOWN CONFIRMED: ${text}`,
+        "SHUTDOWN_CONFIRMED",
+        triggerId
+      );
+
+      // Send confirmation response
+      if (chatPanel) {
+        setTimeout(() => {
+          chatPanel.webview.postMessage({
+            command: "addMessage",
+            text: `🛑 SHUTDOWN CONFIRMED: "${text}"\n\nMCP server shutdown has been approved by user.\n\nCursor Agent will proceed with graceful shutdown.`,
+            type: "system",
+          });
+
+          // Set MCP status to inactive after shutdown confirmation
+          setTimeout(() => {
             if (chatPanel) {
-                setTimeout(() => {
-                    chatPanel.webview.postMessage({
-                        command: 'addMessage',
-                        text: `🛑 SHUTDOWN CONFIRMED: "${text}"\n\nMCP server shutdown has been approved by user.\n\nCursor Agent will proceed with graceful shutdown.`,
-                        type: 'system'
-                    });
-                    
-                    // Set MCP status to inactive after shutdown confirmation
-                    setTimeout(() => {
-                        if (chatPanel) {
-                            chatPanel.webview.postMessage({
-                                command: 'updateMcpStatus',
-                                active: false
-                            });
-                        }
-                    }, 1000);
-                }, 500);
+              chatPanel.webview.postMessage({
+                command: "updateMcpStatus",
+                active: false,
+              });
             }
-        } else {
-            logUserInput(`SHUTDOWN ALTERNATIVE: ${text}`, 'SHUTDOWN_ALTERNATIVE', triggerId);
-            
-            // Send alternative instructions response
-            if (chatPanel) {
-                setTimeout(() => {
-                    chatPanel.webview.postMessage({
-                        command: 'addMessage',
-                        text: `💡 ALTERNATIVE INSTRUCTIONS: "${text}"\n\nYour instructions have been sent to the Cursor Agent instead of shutdown confirmation.\n\nThe Agent will process your alternative request.`,
-                        type: 'system'
-                    });
-                    
-                    // Set MCP status to inactive after alternative instructions
-                    setTimeout(() => {
-                        if (chatPanel) {
-                            chatPanel.webview.postMessage({
-                                command: 'updateMcpStatus',
-                                active: false
-                            });
-                        }
-                    }, 1000);
-                }, 500);
-            }
-        }
-    } else if (specialHandling === 'ingest_text') {
-        logUserInput(`TEXT FEEDBACK: ${text}`, 'TEXT_FEEDBACK', triggerId);
-        
-        // Send text feedback response
-        if (chatPanel) {
-            setTimeout(() => {
-                chatPanel.webview.postMessage({
-                    command: 'addMessage',
-                    text: `🔄 TEXT INPUT PROCESSED: "${text}"\n\nYour feedback on the ingested text has been sent to the Cursor Agent.\n\nThe Agent will continue processing with your input.`,
-                    type: 'system'
-                });
-                
-                // Set MCP status to inactive after text feedback
-                setTimeout(() => {
-                    if (chatPanel) {
-                        chatPanel.webview.postMessage({
-                            command: 'updateMcpStatus',
-                            active: false
-                        });
-                    }
-                }, 1000);
-            }, 500);
-        }
+          }, 1000);
+        }, 500);
+      }
     } else {
-        // Standard handling for other tools
-        // Log to output channel for persistence
-        outputChannel.appendLine(`${mcpIntegration ? 'MCP RESPONSE' : 'REVIEW'} SUBMITTED: ${text}`);
-        
-        // Send standard response back to webview
-        if (chatPanel) {
-            setTimeout(() => {
-                // Pick a random funny response
-                const randomResponse = funnyResponses[Math.floor(Math.random() * funnyResponses.length)];
-                
-                chatPanel.webview.postMessage({
-                    command: 'addMessage',
-                    text: randomResponse,
-                    type: 'system',
-                    plain: true  // Use plain styling for acknowledgments
-                });
-                
-                // Set MCP status to inactive after sending response
-                setTimeout(() => {
-                    if (chatPanel) {
-                        chatPanel.webview.postMessage({
-                            command: 'updateMcpStatus',
-                            active: false
-                        });
-                    }
-                }, 1000);
-                
-            }, 500);
-        }
+      logUserInput(
+        `SHUTDOWN ALTERNATIVE: ${text}`,
+        "SHUTDOWN_ALTERNATIVE",
+        triggerId
+      );
+
+      // Send alternative instructions response
+      if (chatPanel) {
+        setTimeout(() => {
+          chatPanel.webview.postMessage({
+            command: "addMessage",
+            text: `💡 ALTERNATIVE INSTRUCTIONS: "${text}"\n\nYour instructions have been sent to the Cursor Agent instead of shutdown confirmation.\n\nThe Agent will process your alternative request.`,
+            type: "system",
+          });
+
+          // Set MCP status to inactive after alternative instructions
+          setTimeout(() => {
+            if (chatPanel) {
+              chatPanel.webview.postMessage({
+                command: "updateMcpStatus",
+                active: false,
+              });
+            }
+          }, 1000);
+        }, 500);
+      }
     }
+  } else if (specialHandling === "ingest_text") {
+    logUserInput(`TEXT FEEDBACK: ${text}`, "TEXT_FEEDBACK", triggerId);
+
+    // Send text feedback response
+    if (chatPanel) {
+      setTimeout(() => {
+        chatPanel.webview.postMessage({
+          command: "addMessage",
+          text: `🔄 TEXT INPUT PROCESSED: "${text}"\n\nYour feedback on the ingested text has been sent to the Cursor Agent.\n\nThe Agent will continue processing with your input.`,
+          type: "system",
+        });
+
+        // Set MCP status to inactive after text feedback
+        setTimeout(() => {
+          if (chatPanel) {
+            chatPanel.webview.postMessage({
+              command: "updateMcpStatus",
+              active: false,
+            });
+          }
+        }, 1000);
+      }, 500);
+    }
+  } else {
+    // Standard handling for other tools
+    // Log to output channel for persistence
+    outputChannel.appendLine(
+      `${mcpIntegration ? "MCP RESPONSE" : "REVIEW"} SUBMITTED: ${text}`
+    );
+
+    // Send standard response back to webview
+    if (chatPanel) {
+      setTimeout(() => {
+        // Pick a random funny response
+        const randomResponse =
+          funnyResponses[Math.floor(Math.random() * funnyResponses.length)];
+
+        chatPanel.webview.postMessage({
+          command: "addMessage",
+          text: randomResponse,
+          type: "system",
+          plain: true, // Use plain styling for acknowledgments
+        });
+
+        // Set MCP status to inactive after sending response
+        setTimeout(() => {
+          if (chatPanel) {
+            chatPanel.webview.postMessage({
+              command: "updateMcpStatus",
+              active: false,
+            });
+          }
+        }, 1000);
+      }, 500);
+    }
+  }
 }
 
 function handleFileAttachment(triggerId) {
-    logUserInput('User requested file attachment for review', 'FILE_ATTACHMENT', triggerId);
-    
-    vscode.window.showOpenDialog({
-        canSelectMany: true,
-        openLabel: 'Select file(s) for review',
-        filters: {
-            'All files': ['*']
+  logUserInput(
+    "User requested file attachment for review",
+    "FILE_ATTACHMENT",
+    triggerId
+  );
+
+  vscode.window
+    .showOpenDialog({
+      canSelectMany: true,
+      openLabel: "Select file(s) for review",
+      filters: {
+        "All files": ["*"],
+      },
+    })
+    .then((fileUris) => {
+      if (fileUris && fileUris.length > 0) {
+        const filePaths = fileUris.map((uri) => uri.fsPath);
+        const fileNames = filePaths.map((fp) => path.basename(fp));
+
+        logUserInput(
+          `Files selected for review: ${fileNames.join(", ")}`,
+          "FILE_SELECTED",
+          triggerId
+        );
+
+        if (chatPanel) {
+          chatPanel.webview.postMessage({
+            command: "addMessage",
+            text: `Files attached for review:\n${fileNames
+              .map((name) => "• " + name)
+              .join("\n")}\n\nPaths:\n${filePaths
+              .map((fp) => "• " + fp)
+              .join("\n")}`,
+            type: "system",
+          });
         }
-    }).then(fileUris => {
-        if (fileUris && fileUris.length > 0) {
-            const filePaths = fileUris.map(uri => uri.fsPath);
-            const fileNames = filePaths.map(fp => path.basename(fp));
-            
-            logUserInput(`Files selected for review: ${fileNames.join(', ')}`, 'FILE_SELECTED', triggerId);
-            
-            if (chatPanel) {
-                chatPanel.webview.postMessage({
-                    command: 'addMessage',
-                    text: `Files attached for review:\n${fileNames.map(name => '• ' + name).join('\n')}\n\nPaths:\n${filePaths.map(fp => '• ' + fp).join('\n')}`,
-                    type: 'system'
-                });
-            }
-        } else {
-            logUserInput('No files selected for review', 'FILE_CANCELLED', triggerId);
-        }
+      } else {
+        logUserInput(
+          "No files selected for review",
+          "FILE_CANCELLED",
+          triggerId
+        );
+      }
     });
 }
 
 function handleImageUpload(triggerId) {
-    logUserInput('User requested image upload for review', 'IMAGE_UPLOAD', triggerId);
-    
-    vscode.window.showOpenDialog({
-        canSelectMany: true,
-        openLabel: 'Select image(s) to upload',
-        filters: {
-            'Images': ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp']
-        }
-    }).then(fileUris => {
-        if (fileUris && fileUris.length > 0) {
-            fileUris.forEach(fileUri => {
-                const filePath = fileUri.fsPath;
-                const fileName = path.basename(filePath);
-                
-                
-                try {
-                    // Read the image file
-                    const imageBuffer = fs.readFileSync(filePath);
-                    const base64Data = imageBuffer.toString('base64');
-                    const mimeType = getMimeType(fileName);
-                    const dataUrl = `data:${mimeType};base64,${base64Data}`;
-                    
-                    const imageData = {
-                        fileName: fileName,
-                        filePath: filePath,
-                        mimeType: mimeType,
-                        base64Data: base64Data,
-                        dataUrl: dataUrl,
-                        size: imageBuffer.length
-                    };
-                    
-                    logUserInput(`Image uploaded: ${fileName}`, 'IMAGE_UPLOADED', triggerId);
-                    
-                    // Send image data to webview
-                    if (chatPanel) {
-                        chatPanel.webview.postMessage({
-                            command: 'imageUploaded',
-                            imageData: imageData
-                        });
-                    }
-                    
-                } catch (error) {
-                    console.log(`Error processing image ${fileName}: ${error.message}`);
-                    vscode.window.showErrorMessage(`Failed to process image: ${fileName}`);
-                }
-            });
-        } else {
-            logUserInput('No images selected for upload', 'IMAGE_CANCELLED', triggerId);
-        }
+  logUserInput(
+    "User requested image upload for review",
+    "IMAGE_UPLOAD",
+    triggerId
+  );
+
+  vscode.window
+    .showOpenDialog({
+      canSelectMany: true,
+      openLabel: "Select image(s) to upload",
+      filters: {
+        Images: ["png", "jpg", "jpeg", "gif", "bmp", "webp"],
+      },
+    })
+    .then((fileUris) => {
+      if (fileUris && fileUris.length > 0) {
+        fileUris.forEach((fileUri) => {
+          const filePath = fileUri.fsPath;
+          const fileName = path.basename(filePath);
+
+          try {
+            // Read the image file
+            const imageBuffer = fs.readFileSync(filePath);
+            const base64Data = imageBuffer.toString("base64");
+            const mimeType = getMimeType(fileName);
+            const dataUrl = `data:${mimeType};base64,${base64Data}`;
+
+            const imageData = {
+              fileName: fileName,
+              filePath: filePath,
+              mimeType: mimeType,
+              base64Data: base64Data,
+              dataUrl: dataUrl,
+              size: imageBuffer.length,
+            };
+
+            logUserInput(
+              `Image uploaded: ${fileName}`,
+              "IMAGE_UPLOADED",
+              triggerId
+            );
+
+            // Send image data to webview
+            if (chatPanel) {
+              chatPanel.webview.postMessage({
+                command: "imageUploaded",
+                imageData: imageData,
+              });
+            }
+          } catch (error) {
+            console.log(`Error processing image ${fileName}: ${error.message}`);
+            vscode.window.showErrorMessage(
+              `Failed to process image: ${fileName}`
+            );
+          }
+        });
+      } else {
+        logUserInput(
+          "No images selected for upload",
+          "IMAGE_CANCELLED",
+          triggerId
+        );
+      }
     });
 }
 
 function getMimeType(fileName) {
-    const ext = path.extname(fileName).toLowerCase();
-    const mimeTypes = {
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.bmp': 'image/bmp',
-        '.webp': 'image/webp'
-    };
-    return mimeTypes[ext] || 'image/jpeg';
+  const ext = path.extname(fileName).toLowerCase();
+  const mimeTypes = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+    ".webp": "image/webp",
+  };
+  return mimeTypes[ext] || "image/jpeg";
 }
 
 async function handleSpeechToText(audioData, triggerId, isFilePath = false) {
-    try {
-        let tempAudioPath;
-        
-        if (isFilePath) {
-            // Audio data is already a file path
-            tempAudioPath = audioData;
-            console.log(`Using existing audio file for transcription: ${tempAudioPath}`);
-        } else {
-            // Convert base64 audio data to buffer (legacy webview approach)
-            const base64Data = audioData.split(',')[1];
-            const audioBuffer = Buffer.from(base64Data, 'base64');
-            
-            // Save audio to temp file
-            tempAudioPath = getTempPath(`review_gate_audio_${triggerId}_${Date.now()}.wav`);
-            fs.writeFileSync(tempAudioPath, audioBuffer);
-            
-            console.log(`Audio saved for transcription: ${tempAudioPath}`);
-        }
-        
-        // Send to MCP server for transcription
-        const transcriptionRequest = {
-            timestamp: new Date().toISOString(),
-            system: "review-gate-v2",
-            editor: "cursor",
-            data: {
-                tool: "speech_to_text",
-                audio_file: tempAudioPath,
-                trigger_id: triggerId,
-                format: "wav"
-            },
-            mcp_integration: true
-        };
-        
-        const triggerFile = getTempPath(`review_gate_speech_trigger_${triggerId}.json`);
-        fs.writeFileSync(triggerFile, JSON.stringify(transcriptionRequest, null, 2));
-        
-        console.log(`Speech-to-text request sent: ${triggerFile}`);
-        
-        // Poll for transcription result
-        const maxWaitTime = 30000; // 30 seconds
-        const pollInterval = 500; // 500ms
-        let waitTime = 0;
-        
-        const pollForResult = setInterval(() => {
-            const resultFile = getTempPath(`review_gate_speech_response_${triggerId}.json`);
-            
-            if (fs.existsSync(resultFile)) {
-                try {
-                    const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
-                    
-                    if (result.transcription) {
-                        // Send transcription back to webview
-                        if (chatPanel) {
-                            chatPanel.webview.postMessage({
-                                command: 'speechTranscribed',
-                                transcription: result.transcription
-                            });
-                        }
-                        
-                        console.log(`Speech transcribed: ${result.transcription}`);
-                        logUserInput(`Speech transcribed: ${result.transcription}`, 'SPEECH_TRANSCRIBED', triggerId);
-                    }
-                    
-                    // Cleanup - let MCP server handle audio file cleanup to avoid race conditions
-                    try {
-                        fs.unlinkSync(resultFile);
-                        console.log('✅ Cleaned up speech response file');
-                    } catch (e) {
-                        console.log(`Could not clean up response file: ${e.message}`);
-                    }
-                    
-                    try {
-                        fs.unlinkSync(triggerFile);
-                        console.log('✅ Cleaned up speech trigger file');
-                    } catch (e) {
-                        console.log(`Could not clean up trigger file: ${e.message}`);
-                    }
-                    
-                    // Note: Audio file cleanup is handled by MCP server to avoid race conditions
-                    
-                } catch (error) {
-                    console.log(`Error reading transcription result: ${error.message}`);
-                }
-                
-                clearInterval(pollForResult);
-            }
-            
-            waitTime += pollInterval;
-            if (waitTime >= maxWaitTime) {
-                console.log('Speech-to-text timeout');
-                if (chatPanel) {
-                    chatPanel.webview.postMessage({
-                        command: 'speechTranscribed',
-                        transcription: '' // Empty transcription on timeout
-                    });
-                }
-                clearInterval(pollForResult);
-                
-                // Cleanup on timeout - only clean up trigger file
-                try {
-                    fs.unlinkSync(triggerFile);
-                    console.log('✅ Cleaned up trigger file on timeout');
-                } catch (e) {
-                    console.log(`Could not clean up trigger file on timeout: ${e.message}`);
-                }
-                // Note: Audio file cleanup handled by MCP server or OS temp cleanup
-            }
-        }, pollInterval);
-        
-    } catch (error) {
-        console.log(`Speech-to-text error: ${error.message}`);
-        if (chatPanel) {
-            chatPanel.webview.postMessage({
-                command: 'speechTranscribed',
-                transcription: '' // Empty transcription on error
-            });
-        }
+  try {
+    let tempAudioPath;
+
+    if (isFilePath) {
+      // Audio data is already a file path
+      tempAudioPath = audioData;
+      console.log(
+        `Using existing audio file for transcription: ${tempAudioPath}`
+      );
+    } else {
+      // Convert base64 audio data to buffer (legacy webview approach)
+      const base64Data = audioData.split(",")[1];
+      const audioBuffer = Buffer.from(base64Data, "base64");
+
+      // Save audio to temp file
+      tempAudioPath = getTempPath(
+        `review_gate_audio_${triggerId}_${Date.now()}.wav`
+      );
+      fs.writeFileSync(tempAudioPath, audioBuffer);
+
+      console.log(`Audio saved for transcription: ${tempAudioPath}`);
     }
+
+    // Send to MCP server for transcription
+    const transcriptionRequest = {
+      timestamp: new Date().toISOString(),
+      system: "review-gate-v2",
+      editor: "cursor",
+      data: {
+        tool: "speech_to_text",
+        audio_file: tempAudioPath,
+        trigger_id: triggerId,
+        format: "wav",
+      },
+      mcp_integration: true,
+    };
+
+    const triggerFile = getTempPath(
+      `review_gate_speech_trigger_${triggerId}.json`
+    );
+    fs.writeFileSync(
+      triggerFile,
+      JSON.stringify(transcriptionRequest, null, 2)
+    );
+
+    console.log(`Speech-to-text request sent: ${triggerFile}`);
+
+    // Poll for transcription result
+    const maxWaitTime = 30000; // 30 seconds
+    const pollInterval = 500; // 500ms
+    let waitTime = 0;
+
+    const pollForResult = setInterval(() => {
+      const resultFile = getTempPath(
+        `review_gate_speech_response_${triggerId}.json`
+      );
+
+      if (fs.existsSync(resultFile)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+
+          if (result.transcription) {
+            // Send transcription back to webview
+            if (chatPanel) {
+              chatPanel.webview.postMessage({
+                command: "speechTranscribed",
+                transcription: result.transcription,
+              });
+            }
+
+            console.log(`Speech transcribed: ${result.transcription}`);
+            logUserInput(
+              `Speech transcribed: ${result.transcription}`,
+              "SPEECH_TRANSCRIBED",
+              triggerId
+            );
+          }
+
+          // Cleanup - let MCP server handle audio file cleanup to avoid race conditions
+          try {
+            fs.unlinkSync(resultFile);
+            console.log("✅ Cleaned up speech response file");
+          } catch (e) {
+            console.log(`Could not clean up response file: ${e.message}`);
+          }
+
+          try {
+            fs.unlinkSync(triggerFile);
+            console.log("✅ Cleaned up speech trigger file");
+          } catch (e) {
+            console.log(`Could not clean up trigger file: ${e.message}`);
+          }
+
+          // Note: Audio file cleanup is handled by MCP server to avoid race conditions
+        } catch (error) {
+          console.log(`Error reading transcription result: ${error.message}`);
+        }
+
+        clearInterval(pollForResult);
+      }
+
+      waitTime += pollInterval;
+      if (waitTime >= maxWaitTime) {
+        console.log("Speech-to-text timeout");
+        if (chatPanel) {
+          chatPanel.webview.postMessage({
+            command: "speechTranscribed",
+            transcription: "", // Empty transcription on timeout
+          });
+        }
+        clearInterval(pollForResult);
+
+        // Cleanup on timeout - only clean up trigger file
+        try {
+          fs.unlinkSync(triggerFile);
+          console.log("✅ Cleaned up trigger file on timeout");
+        } catch (e) {
+          console.log(
+            `Could not clean up trigger file on timeout: ${e.message}`
+          );
+        }
+        // Note: Audio file cleanup handled by MCP server or OS temp cleanup
+      }
+    }, pollInterval);
+  } catch (error) {
+    console.log(`Speech-to-text error: ${error.message}`);
+    if (chatPanel) {
+      chatPanel.webview.postMessage({
+        command: "speechTranscribed",
+        transcription: "", // Empty transcription on error
+      });
+    }
+  }
 }
 
 async function validateSoxSetup() {
-    /**
-     * Validate SoX installation and microphone access
-     * Returns: {success: boolean, error: string}
-     */
-    return new Promise((resolve) => {
-        try {
-            // Test if sox command exists
-            const testProcess = spawn('sox', ['--version'], { stdio: 'pipe' });
-            
-            let soxVersion = '';
-            testProcess.stdout.on('data', (data) => {
-                soxVersion += data.toString();
-            });
-            
-            testProcess.on('close', (code) => {
-                if (code !== 0) {
-                    resolve({ success: false, error: 'SoX command not found or failed' });
-                    return;
-                }
-                
-                console.log(`✅ SoX found: ${soxVersion.trim()}`);
-                
-                // Test microphone access with a very short recording
-                const testFile = getTempPath(`review_gate_test_${Date.now()}.wav`);
-                const micTestProcess = spawn('sox', ['-d', '-r', '16000', '-c', '1', testFile, 'trim', '0', '0.1'], { stdio: 'pipe' });
-                
-                let testError = '';
-                micTestProcess.stderr.on('data', (data) => {
-                    testError += data.toString();
-                });
-                
-                micTestProcess.on('close', (testCode) => {
-                    // Clean up test file
-                    try {
-                        if (fs.existsSync(testFile)) {
-                            fs.unlinkSync(testFile);
-                        }
-                    } catch (e) {}
-                    
-                    if (testCode !== 0) {
-                        let errorMsg = 'Microphone access failed';
-                        if (testError.includes('Permission denied')) {
-                            errorMsg = 'Microphone permission denied - please allow microphone access in system settings';
-                        } else if (testError.includes('No such device')) {
-                            errorMsg = 'No microphone device found';
-                        } else if (testError.includes('Device or resource busy')) {
-                            errorMsg = 'Microphone is busy - close other recording applications';
-                        } else if (testError) {
-                            errorMsg = `Microphone test failed: ${testError.substring(0, 100)}`;
-                        }
-                        resolve({ success: false, error: errorMsg });
-                    } else {
-                        console.log('✅ Microphone access test successful');
-                        resolve({ success: true, error: null });
-                    }
-                });
-                
-                // Timeout for microphone test
-                setTimeout(() => {
-                    try {
-                        micTestProcess.kill('SIGTERM');
-                        resolve({ success: false, error: 'Microphone test timed out' });
-                    } catch (e) {}
-                }, 3000);
-            });
-            
-            testProcess.on('error', (error) => {
-                resolve({ success: false, error: `SoX not installed: ${error.message}` });
-            });
-            
-            // Timeout for version check
-            setTimeout(() => {
-                try {
-                    testProcess.kill('SIGTERM');
-                    resolve({ success: false, error: 'SoX version check timed out' });
-                } catch (e) {}
-            }, 2000);
-            
-        } catch (error) {
-            resolve({ success: false, error: `SoX validation error: ${error.message}` });
+  /**
+   * Validate SoX installation and microphone access
+   * Returns: {success: boolean, error: string}
+   */
+  return new Promise((resolve) => {
+    try {
+      // Test if sox command exists
+      const testProcess = spawn("sox", ["--version"], { stdio: "pipe" });
+
+      let soxVersion = "";
+      testProcess.stdout.on("data", (data) => {
+        soxVersion += data.toString();
+      });
+
+      testProcess.on("close", (code) => {
+        if (code !== 0) {
+          resolve({ success: false, error: "SoX command not found or failed" });
+          return;
         }
-    });
+
+        console.log(`✅ SoX found: ${soxVersion.trim()}`);
+
+        // Test microphone access with a very short recording
+        const testFile = getTempPath(`review_gate_test_${Date.now()}.wav`);
+        const micTestProcess = spawn(
+          "sox",
+          ["-d", "-r", "16000", "-c", "1", testFile, "trim", "0", "0.1"],
+          { stdio: "pipe" }
+        );
+
+        let testError = "";
+        micTestProcess.stderr.on("data", (data) => {
+          testError += data.toString();
+        });
+
+        micTestProcess.on("close", (testCode) => {
+          // Clean up test file
+          try {
+            if (fs.existsSync(testFile)) {
+              fs.unlinkSync(testFile);
+            }
+          } catch (e) {}
+
+          if (testCode !== 0) {
+            let errorMsg = "Microphone access failed";
+            if (testError.includes("Permission denied")) {
+              errorMsg =
+                "Microphone permission denied - please allow microphone access in system settings";
+            } else if (testError.includes("No such device")) {
+              errorMsg = "No microphone device found";
+            } else if (testError.includes("Device or resource busy")) {
+              errorMsg =
+                "Microphone is busy - close other recording applications";
+            } else if (testError) {
+              errorMsg = `Microphone test failed: ${testError.substring(
+                0,
+                100
+              )}`;
+            }
+            resolve({ success: false, error: errorMsg });
+          } else {
+            console.log("✅ Microphone access test successful");
+            resolve({ success: true, error: null });
+          }
+        });
+
+        // Timeout for microphone test
+        setTimeout(() => {
+          try {
+            micTestProcess.kill("SIGTERM");
+            resolve({ success: false, error: "Microphone test timed out" });
+          } catch (e) {}
+        }, 3000);
+      });
+
+      testProcess.on("error", (error) => {
+        resolve({
+          success: false,
+          error: `SoX not installed: ${error.message}`,
+        });
+      });
+
+      // Timeout for version check
+      setTimeout(() => {
+        try {
+          testProcess.kill("SIGTERM");
+          resolve({ success: false, error: "SoX version check timed out" });
+        } catch (e) {}
+      }, 2000);
+    } catch (error) {
+      resolve({
+        success: false,
+        error: `SoX validation error: ${error.message}`,
+      });
+    }
+  });
 }
 
 async function startNodeRecording(triggerId) {
-    try {
-        if (currentRecording) {
-            console.log('Recording already in progress');
-            // Send feedback to webview
-            if (chatPanel) {
-                chatPanel.webview.postMessage({
-                    command: 'speechTranscribed',
-                    transcription: '',
-                    error: 'Recording already in progress'
-                });
-            }
-            return;
-        }
-        
-        // Validate SoX setup before recording
-        console.log('🔍 Validating SoX and microphone setup...');
-        const validation = await validateSoxSetup();
-        if (!validation.success) {
-            console.log(`❌ SoX validation failed: ${validation.error}`);
-            if (chatPanel) {
-                chatPanel.webview.postMessage({
-                    command: 'speechTranscribed',
-                    transcription: '',
-                    error: validation.error
-                });
-            }
-            return;
-        }
-        console.log('✅ SoX validation successful - proceeding with recording');
-        
-        const timestamp = Date.now();
-        const audioFile = getTempPath(`review_gate_audio_${triggerId}_${timestamp}.wav`);
-        
-        console.log(`🎤 Starting SoX recording: ${audioFile}`);
-        
-        // Use sox directly to record audio
-        // sox -d -r 16000 -c 1 output.wav (let SoX auto-detect bit depth)
-        const soxArgs = [
-            '-d',           // Use default input device (microphone)
-            '-r', '16000',  // Sample rate 16kHz
-            '-c', '1',      // Mono (1 channel)
-            audioFile       // Output file
-        ];
-        
-        console.log(`🎤 Starting sox with args:`, soxArgs);
-        
-        // Spawn sox process
-        currentRecording = spawn('sox', soxArgs);
-        
-        // Store metadata
-        currentRecording.audioFile = audioFile;
-        currentRecording.triggerId = triggerId;
-        currentRecording.startTime = Date.now();
-        
-        // Handle sox process events
-        currentRecording.on('error', (error) => {
-            console.log(`❌ SoX process error: ${error.message}`);
-            if (chatPanel) {
-                chatPanel.webview.postMessage({
-                    command: 'speechTranscribed',
-                    transcription: '',
-                    error: `Recording failed: ${error.message}`
-                });
-            }
-            currentRecording = null;
+  try {
+    if (currentRecording) {
+      console.log("Recording already in progress");
+      // Send feedback to webview
+      if (chatPanel) {
+        chatPanel.webview.postMessage({
+          command: "speechTranscribed",
+          transcription: "",
+          error: "Recording already in progress",
         });
-        
-        currentRecording.stderr.on('data', (data) => {
-            console.log(`SoX stderr: ${data}`);
-        });
-        
-        console.log(`✅ SoX recording started: PID ${currentRecording.pid}, file: ${audioFile}`);
-        
-        // Send confirmation to webview that recording has started
-        if (chatPanel) {
-            chatPanel.webview.postMessage({
-                command: 'recordingStarted',
-                audioFile: audioFile
-            });
-        }
-        
-    } catch (error) {
-        console.log(`❌ Failed to start SoX recording: ${error.message}`);
-        if (chatPanel) {
-            chatPanel.webview.postMessage({
-                command: 'speechTranscribed',
-                transcription: '',
-                error: `Recording failed: ${error.message}`
-            });
-        }
-        currentRecording = null;
+      }
+      return;
     }
+
+    // Validate SoX setup before recording
+    console.log("🔍 Validating SoX and microphone setup...");
+    const validation = await validateSoxSetup();
+    if (!validation.success) {
+      console.log(`❌ SoX validation failed: ${validation.error}`);
+      if (chatPanel) {
+        chatPanel.webview.postMessage({
+          command: "speechTranscribed",
+          transcription: "",
+          error: validation.error,
+        });
+      }
+      return;
+    }
+    console.log("✅ SoX validation successful - proceeding with recording");
+
+    const timestamp = Date.now();
+    const audioFile = getTempPath(
+      `review_gate_audio_${triggerId}_${timestamp}.wav`
+    );
+
+    console.log(`🎤 Starting SoX recording: ${audioFile}`);
+
+    // Use sox directly to record audio
+    // sox -d -r 16000 -c 1 output.wav (let SoX auto-detect bit depth)
+    const soxArgs = [
+      "-d", // Use default input device (microphone)
+      "-r",
+      "16000", // Sample rate 16kHz
+      "-c",
+      "1", // Mono (1 channel)
+      audioFile, // Output file
+    ];
+
+    console.log(`🎤 Starting sox with args:`, soxArgs);
+
+    // Spawn sox process
+    currentRecording = spawn("sox", soxArgs);
+
+    // Store metadata
+    currentRecording.audioFile = audioFile;
+    currentRecording.triggerId = triggerId;
+    currentRecording.startTime = Date.now();
+
+    // Handle sox process events
+    currentRecording.on("error", (error) => {
+      console.log(`❌ SoX process error: ${error.message}`);
+      if (chatPanel) {
+        chatPanel.webview.postMessage({
+          command: "speechTranscribed",
+          transcription: "",
+          error: `Recording failed: ${error.message}`,
+        });
+      }
+      currentRecording = null;
+    });
+
+    currentRecording.stderr.on("data", (data) => {
+      console.log(`SoX stderr: ${data}`);
+    });
+
+    console.log(
+      `✅ SoX recording started: PID ${currentRecording.pid}, file: ${audioFile}`
+    );
+
+    // Send confirmation to webview that recording has started
+    if (chatPanel) {
+      chatPanel.webview.postMessage({
+        command: "recordingStarted",
+        audioFile: audioFile,
+      });
+    }
+  } catch (error) {
+    console.log(`❌ Failed to start SoX recording: ${error.message}`);
+    if (chatPanel) {
+      chatPanel.webview.postMessage({
+        command: "speechTranscribed",
+        transcription: "",
+        error: `Recording failed: ${error.message}`,
+      });
+    }
+    currentRecording = null;
+  }
 }
 
 function stopNodeRecording(triggerId) {
-    try {
-        if (!currentRecording) {
-            console.log('No recording in progress');
-            if (chatPanel) {
-                chatPanel.webview.postMessage({
-                    command: 'speechTranscribed',
-                    transcription: '',
-                    error: 'No recording in progress'
-                });
-            }
-            return;
-        }
-        
-        const audioFile = currentRecording.audioFile;
-        const recordingPid = currentRecording.pid;
-        console.log(`🛑 Stopping SoX recording: PID ${recordingPid}, file: ${audioFile}`);
-        
-        // Stop the sox process by sending SIGTERM
-        currentRecording.kill('SIGTERM');
-        
-        // Wait for process to exit and file to be finalized
-        currentRecording.on('exit', (code, signal) => {
-            console.log(`📝 SoX process exited with code: ${code}, signal: ${signal}`);
-            
-            // Give a moment for file system to sync
-            setTimeout(() => {
-                console.log(`📝 Checking for audio file: ${audioFile}`);
-                
-                if (fs.existsSync(audioFile)) {
-                    const stats = fs.statSync(audioFile);
-                    console.log(`✅ Audio file created: ${audioFile} (${stats.size} bytes)`);
-                    
-                    // Check minimum file size (more generous for SoX)
-                    if (stats.size > 500) {
-                        console.log(`🎤 Audio file ready for transcription: ${audioFile} (${stats.size} bytes)`);
-                        // Send to MCP server for transcription
-                        handleSpeechToText(audioFile, triggerId, true);
-                    } else {
-                        console.log('⚠️ Audio file too small, probably no speech detected');
-                        if (chatPanel) {
-                            chatPanel.webview.postMessage({
-                                command: 'speechTranscribed',
-                                transcription: '',
-                                error: 'No speech detected - try speaking louder or closer to microphone'
-                            });
-                        }
-                        // Clean up small file
-                        try {
-                            fs.unlinkSync(audioFile);
-                        } catch (e) {
-                            console.log(`Could not clean up small file: ${e.message}`);
-                        }
-                    }
-                } else {
-                    console.log('❌ Audio file was not created');
-                    if (chatPanel) {
-                        chatPanel.webview.postMessage({
-                            command: 'speechTranscribed',
-                            transcription: '',
-                            error: 'Recording failed - no audio file created'
-                        });
-                    }
-                }
-                
-                currentRecording = null;
-            }, 1000); // Wait 1 second for file system sync
+  try {
+    if (!currentRecording) {
+      console.log("No recording in progress");
+      if (chatPanel) {
+        chatPanel.webview.postMessage({
+          command: "speechTranscribed",
+          transcription: "",
+          error: "No recording in progress",
         });
-        
-        // Set a timeout in case the process doesn't exit gracefully
-        setTimeout(() => {
-            if (currentRecording && currentRecording.pid) {
-                console.log(`⚠️ Force killing SoX process: ${currentRecording.pid}`);
-                try {
-                    currentRecording.kill('SIGKILL');
-                } catch (e) {
-                    console.log(`Could not force kill: ${e.message}`);
-                }
-                currentRecording = null;
-            }
-        }, 3000);
-        
-    } catch (error) {
-        console.log(`❌ Failed to stop SoX recording: ${error.message}`);
-        currentRecording = null;
-        if (chatPanel) {
-            chatPanel.webview.postMessage({
-                command: 'speechTranscribed',
-                transcription: '',
-                error: `Stop recording failed: ${error.message}`
-            });
-        }
+      }
+      return;
     }
+
+    const audioFile = currentRecording.audioFile;
+    const recordingPid = currentRecording.pid;
+    console.log(
+      `🛑 Stopping SoX recording: PID ${recordingPid}, file: ${audioFile}`
+    );
+
+    // Stop the sox process by sending SIGTERM
+    currentRecording.kill("SIGTERM");
+
+    // Wait for process to exit and file to be finalized
+    currentRecording.on("exit", (code, signal) => {
+      console.log(
+        `📝 SoX process exited with code: ${code}, signal: ${signal}`
+      );
+
+      // Give a moment for file system to sync
+      setTimeout(() => {
+        console.log(`📝 Checking for audio file: ${audioFile}`);
+
+        if (fs.existsSync(audioFile)) {
+          const stats = fs.statSync(audioFile);
+          console.log(
+            `✅ Audio file created: ${audioFile} (${stats.size} bytes)`
+          );
+
+          // Check minimum file size (more generous for SoX)
+          if (stats.size > 500) {
+            console.log(
+              `🎤 Audio file ready for transcription: ${audioFile} (${stats.size} bytes)`
+            );
+            // Send to MCP server for transcription
+            handleSpeechToText(audioFile, triggerId, true);
+          } else {
+            console.log("⚠️ Audio file too small, probably no speech detected");
+            if (chatPanel) {
+              chatPanel.webview.postMessage({
+                command: "speechTranscribed",
+                transcription: "",
+                error:
+                  "No speech detected - try speaking louder or closer to microphone",
+              });
+            }
+            // Clean up small file
+            try {
+              fs.unlinkSync(audioFile);
+            } catch (e) {
+              console.log(`Could not clean up small file: ${e.message}`);
+            }
+          }
+        } else {
+          console.log("❌ Audio file was not created");
+          if (chatPanel) {
+            chatPanel.webview.postMessage({
+              command: "speechTranscribed",
+              transcription: "",
+              error: "Recording failed - no audio file created",
+            });
+          }
+        }
+
+        currentRecording = null;
+      }, 1000); // Wait 1 second for file system sync
+    });
+
+    // Set a timeout in case the process doesn't exit gracefully
+    setTimeout(() => {
+      if (currentRecording && currentRecording.pid) {
+        console.log(`⚠️ Force killing SoX process: ${currentRecording.pid}`);
+        try {
+          currentRecording.kill("SIGKILL");
+        } catch (e) {
+          console.log(`Could not force kill: ${e.message}`);
+        }
+        currentRecording = null;
+      }
+    }, 3000);
+  } catch (error) {
+    console.log(`❌ Failed to stop SoX recording: ${error.message}`);
+    currentRecording = null;
+    if (chatPanel) {
+      chatPanel.webview.postMessage({
+        command: "speechTranscribed",
+        transcription: "",
+        error: `Stop recording failed: ${error.message}`,
+      });
+    }
+  }
 }
 
 function deactivate() {
-    // Silent deactivation
-    
-    if (reviewGateWatcher) {
-        clearInterval(reviewGateWatcher);
-    }
-    
-    if (statusCheckInterval) {
-        clearInterval(statusCheckInterval);
-    }
-    
-    if (outputChannel) {
-        outputChannel.dispose();
-    }
+  // Silent deactivation
+
+  if (reviewGateWatcher) {
+    clearInterval(reviewGateWatcher);
+  }
+
+  if (statusCheckInterval) {
+    clearInterval(statusCheckInterval);
+  }
+
+  if (outputChannel) {
+    outputChannel.dispose();
+  }
 }
 
 module.exports = {
-    activate,
-    deactivate
-}; 
+  activate,
+  deactivate,
+};

@@ -37,6 +37,11 @@
         "command": "reviewGate.openChat",
         "title": "Open Review Gate v2",
         "category": "Review Gate"
+      },
+      {
+        "command": "reviewGate.toggleSound",
+        "title": "Toggle Sound Notifications",
+        "category": "Review Gate"
       }
     ],
     "keybindings": [
@@ -47,7 +52,17 @@
         "win": "ctrl+shift+r",
         "linux": "ctrl+shift+r"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Review Gate V2",
+      "properties": {
+        "reviewGate.enableSound": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable sound notifications when Review Gate popup appears"
+        }
+      }
+    }
   },
   "scripts": {
     "package": "vsce package"
